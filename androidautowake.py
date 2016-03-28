@@ -66,72 +66,72 @@ sys.stderr = MyLogger(logger, logging.ERROR)
 
 logger.info('Starting Android auto-wake service')
 
+# Configure detection pin as an input, pulled-down when no active
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(SENSOR_PIN, GPIO.IN, GPIO.PUD_DOWN)
 
+# Execute a shell command and get stdout traces
 def run_command_and_get_output(command):
 	process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
 	return process.communicate()[0]
+
+#############
+#  MAIN LOOP
+#############
 
 while(True):
 
 	try:
 		logger.info('Starting loop')
 
+		# Wait for next detection, but only if signal is not already high
 		if not GPIO.input(SENSOR_PIN):
 			logger.info('Waiting for next detection...')
 			GPIO.wait_for_edge(SENSOR_PIN, GPIO.RISING)
 			logger.info("Sensor rising edge detected")
 
+		# Check if signal is still high before proceeding: the rising edge might have been a glitch.
 		if GPIO.input(SENSOR_PIN):
-			logger.info("Turning on USB")
+			
+			# Power the USB port
+			logger.info("Turning USB power ON")
 			os.system("./ykush -u 1")
 
-			start = time.time()
-
+			# Poll until device is seen by adb
 			while True:
 				check = run_command_and_get_output("./adb devices")
 				if DEVICE_ID in check:
 					break
 			
-			end = time.time()
-			print(end - start)
+			# Send simulated power button push (224 = "KEYCODE_WAKEUP")
+			logger.info("sending adb wake keyevent")
+			os.system("./adb shell input keyevent 224")
 
-			logger.info("sending adb key 82")
-			os.system("./adb shell input keyevent 82")
-
-			start = time.time()
-
+			# Wait until device tries to go back to sleep
 			while True:
 				time.sleep(1)
 				check = run_command_and_get_output("./adb shell dumpsys power")
 				if "mPowerState=0" in check:
 					break
 
-			end = time.time()
-			print(end - start)
-
-			logger.info("sending adb key 26")
+			# Send simulated power button push (26 = "KEYCODE_POWER" ) 
+			logger.info("sending adb power off keyevent")
 			os.system("./adb shell input keyevent 26")
 			
-			logger.info("turning USB OFF")
+			# Power-off the USB port to simulate unplugging the cable
+			logger.info("turning USB power OFF")
 			os.system("./ykush -d 1")
 
 			# Turn USB power back on to save time at next detection, BUT not too early, otherwise
-			# it will prevent the screen going to deep sleep.
-			remainingSeconds = 30
-			delay=1
-			while remainingSeconds > 0:
-				if GPIO.input(SENSOR_PIN):
-					break
-				time.sleep(delay)
-				remainingSeconds = remainingSeconds - delay
-
-			# No re-activation detected, and by now screen should have gone to deep sleep:
-			# turn USB back on to speed-up adb communication upon next detection
-			if remainingSeconds == 0:
-				logger.info("turning USB back ON for next time")
-				os.system("./ykush -u 1")
+			# it will prevent the screen going to deep sleep. Since we also wait to be able to react
+			# to a possible new detection during those 30 seconds, wait for a rising edge with a timeout
+			# of 30 seconds
+			
+			# We reached the timeout, i.e. no new detection occurred
+			if GPIO.wait_for_edge(SENSOR_PIN, GPIO.RISING, timeout=30000) is None:
+				logger.info("turning USB power back ON for next time")
+				os.system("./ykush -u 1")				
+			# a new detection occurred: just loop back to the beginning to handle it.
 			else:
 				logger.info("shutdown interrupted")
 
