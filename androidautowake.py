@@ -75,6 +75,27 @@ def run_command_and_get_output(command):
 	process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
 	return process.communicate()[0]
 
+def wakeDevice(log=True):
+	# Send simulated power button push (224 = "KEYCODE_WAKEUP")
+	if log:
+		logger.info("sending wake command ")
+	os.system("./adb shell input keyevent 224")
+
+def toggleDevicePower():
+	# Send simulated power button push (26 = "KEYCODE_POWER" ) 
+	logger.info("sending power off command")
+	os.system("./adb shell input keyevent 26")
+
+def powerOffUSBlink():
+	# Power-off the USB port to simulate unplugging the cable
+	logger.info("turning USB power OFF")
+	os.system("./ykush -d 1")
+
+def powerOnUSBlink():
+	# Power-on the USB port
+	logger.info("turning USB power ON")
+	os.system("./ykush -u 1")
+
 #############
 #  MAIN LOOP
 #############
@@ -88,14 +109,12 @@ while(True):
 		if not GPIO.input(SENSOR_PIN):
 			logger.info('Waiting for next detection...')
 			GPIO.wait_for_edge(SENSOR_PIN, GPIO.RISING)
-			logger.info("Sensor rising edge detected")
+			logger.info("Presence DETECTED!")
 
 		# Check if signal is still high before proceeding: the rising edge might have been a glitch.
 		if GPIO.input(SENSOR_PIN):
 			
-			# Power the USB port
-			logger.info("Turning USB power ON")
-			os.system("./ykush -u 1")
+			powerOnUSBlink()
 
 			# Poll until device is seen by adb
 			while True:
@@ -103,24 +122,25 @@ while(True):
 				if DEVICE_ID in check:
 					break
 			
-			# Send simulated power button push (224 = "KEYCODE_WAKEUP")
-			logger.info("sending adb wake keyevent")
-			os.system("./adb shell input keyevent 224")
+			wakeDevice()
 
 			# Wait until device tries to go back to sleep
+			nbRefresh = 0
 			while True:
 				time.sleep(1)
 				check = run_command_and_get_output("./adb shell dumpsys power")
 				if "mPowerState=0" in check:
+					logger.info("device going back to sleep after " + str(nbRefresh) + " wake refresh cycles")
 					break
+				# If a new detection occurs, resend wake command to keep screen alive.
+				# Just reading the instantaneous value is ok since I setup cooldown time such that 
+				# signal stays high for about 2 seconds after each detection, and we loop 
+				# every second
+				elif GPIO.input(SENSOR_PIN):
+					wakeDevice(False)
+					nbRefresh = nbRefresh + 1
 
-			# Send simulated power button push (26 = "KEYCODE_POWER" ) 
-			logger.info("sending adb power off keyevent")
-			os.system("./adb shell input keyevent 26")
-			
-			# Power-off the USB port to simulate unplugging the cable
-			logger.info("turning USB power OFF")
-			os.system("./ykush -d 1")
+			powerOffUSBlink()
 
 			# Turn USB power back on to save time at next detection, BUT not too early, otherwise
 			# it will prevent the screen going to deep sleep. Since we also wait to be able to react
@@ -129,11 +149,11 @@ while(True):
 			
 			# We reached the timeout, i.e. no new detection occurred
 			if GPIO.wait_for_edge(SENSOR_PIN, GPIO.RISING, timeout=30000) is None:
-				logger.info("turning USB power back ON for next time")
-				os.system("./ykush -u 1")				
+				logger.info("wait before USB power on: completed")
+				powerOnUSBlink()				
 			# a new detection occurred: just loop back to the beginning to handle it.
 			else:
-				logger.info("shutdown interrupted")
+				logger.info("wait before USB power on: interrupted")
 
 	except:
 		logger.info("*****Exception in main loop, continuing in 60 seconds******")
@@ -142,4 +162,3 @@ while(True):
 		del exc_traceback
 		time.sleep(60.0)
 		continue
-
